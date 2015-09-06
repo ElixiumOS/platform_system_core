@@ -409,6 +409,8 @@ static void draw_battery(const struct charger* charger)
     }
     draw_clock(anim);
     draw_percent(anim);
+
+    healthd_board_mode_charger_draw_battery(batt_prop);
 }
 
 static void redraw_screen(struct charger *charger)
@@ -627,6 +629,7 @@ static void set_next_key_check(struct charger *charger,
 
 static void process_key(struct charger *charger, int code, int64_t now)
 {
+    struct animation *batt_anim = charger->batt_anim;
     struct key_state *key = &charger->keys[code];
 
     if (code == KEY_POWER) {
@@ -647,6 +650,7 @@ static void process_key(struct charger *charger, int code, int64_t now)
                    accordingly. */
                 if (property_get_bool("ro.enable_boot_charger_mode", false)) {
                     LOGW("[%" PRId64 "] booting from charger mode\n", now);
+                    healthd_board_mode_charger_set_backlight(false);
                     property_set("sys.boot_from_charger_mode", "1");
                 } else {
                     if (charger->batt_anim->cur_level >= charger->boot_min_cap) {
@@ -662,17 +666,25 @@ static void process_key(struct charger *charger, int code, int64_t now)
                  * make sure we wake up at the right-ish time to check
                  */
                 set_next_key_check(charger, key, POWER_ON_KEY_TIME);
-
-               /* Turn on the display and kick animation on power-key press
-                * rather than on key release
-                */
-                kick_animation(charger->batt_anim);
-                request_suspend(false);
             }
         } else {
-            /* if the power key got released, force screen state cycle */
             if (key->pending) {
-                kick_animation(charger->batt_anim);
+                /* If key is pressed when the animation is not running, kick
+                 * the animation and quite suspend; If key is pressed when
+                 * the animation is running, turn off the animation and request
+                 * suspend.
+                 */
+                if (!batt_anim->run) {
+                    kick_animation(batt_anim);
+                    request_suspend(false);
+                } else {
+                    reset_animation(batt_anim);
+                    charger->next_screen_transition = -1;
+                    healthd_board_mode_charger_set_backlight(false);
+                    gr_fb_blank(true);
+                    if (charger->charger_connected)
+                        request_suspend(true);
+                }
             }
         }
     }
@@ -692,6 +704,8 @@ static void handle_power_supply_state(struct charger *charger, int64_t now)
 {
     if (!charger->have_battery_state)
         return;
+
+    healthd_board_mode_charger_battery_update(batt_prop);
 
     if (!charger->charger_connected) {
 
@@ -855,6 +869,8 @@ void healthd_mode_charger_init(struct healthd_config* config)
     dump_last_kmsg();
 
     LOGW("--------------- STARTING CHARGER MODE ---------------\n");
+
+    healthd_board_mode_charger_init();
 
     ret = ev_init(std::bind(&input_callback, charger, std::placeholders::_1,
                             std::placeholders::_2));
